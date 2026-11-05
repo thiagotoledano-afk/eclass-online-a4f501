@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Eclass Tracker</title>
+<meta name="eclass-base" content="/eclass-online-a4f501">
+<link rel="stylesheet" href="/eclass-online-a4f501/static/style.css">
+<script>window.ECLASS_ONLINE = true;</script>
+<script src="/eclass-online-a4f501/static/fullcalendar.min.js" defer></script>
+<script src="/eclass-online-a4f501/static/fullcalendar-pt-br.js" defer></script>
+<script src="/eclass-online-a4f501/static/calendario.js" defer></script>
+<style>
+  [hidden] { display: none !important; }   /* .login e .faixa-online definem display e anulariam o hidden */
+  .faixa-online { background: var(--tinta); color: var(--papel); font: 600 12px/1.4 var(--mono); text-transform: uppercase;
+                  padding: 8px 16px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .faixa-online button { background: var(--papel); color: var(--tinta); min-height: 0; padding: 4px 8px; box-shadow: none; }
+  .faixa-online .curto { display: none; }
+  @media (max-width: 720px) {
+    .faixa-online { flex-wrap: nowrap; align-items: center; padding: 6px 14px; font-size: 11px; }
+    .faixa-online .longo { display: none; }
+    .faixa-online .curto { display: inline; }
+  }
+  .so-leitura { font: 600 11px/1.2 var(--mono); text-transform: uppercase; border: 2px solid currentColor; padding: 4px 6px; display: inline-block; }
+  #entrar label { display: flex; gap: 8px; align-items: center; font: 500 13px var(--mono); margin-bottom: 16px; }
+  #entrar input[type=checkbox] { width: 18px; height: 18px; margin: 0; }
+</style>
+</head>
+<body>
+<div id="tela-login" class="login">
+  <form id="entrar" class="bloco">
+    <div class="rotulo">Eclass Tracker · online</div>
+    <h1>Entrar</h1>
+    <div id="erro" class="erro-msg" role="alert" hidden></div>
+    <label class="rotulo" for="senha" style="display:block">Senha do dashboard</label>
+    <input id="senha" type="password" autocomplete="current-password" required autofocus>
+    <label><input id="lembrar" type="checkbox"> Lembrar neste aparelho (só no seu celular/computador)</label>
+    <button class="primario" type="submit" id="botao">Entrar</button>
+    <p class="meta" style="margin-top:16px">Os dados chegam criptografados e só abrem com a sua senha, aqui no navegador.</p>
+  </form>
+</div>
+<div id="faixa" class="faixa-online" hidden>
+  <span><span class="longo">Versão online · somente leitura · atualizada em </span><span class="curto">Online · atualizado </span><b id="quando"></b></span>
+  <button type="button" id="sair">Sair</button>
+</div>
+<div id="app"></div>
+
+<script>
+(function () {
+  "use strict";
+  var CHAVE_LOCAL = "eclass-chave";
+  // Site num subcaminho (GitHub Pages: usuario.github.io/eclass-online): BASE = "/eclass-online"; na raiz, "".
+  var BASE = (document.querySelector('meta[name="eclass-base"]') || {}).content || "";
+  function semBase(p) { return BASE && p.indexOf(BASE) === 0 ? (p.slice(BASE.length) || "/") : p; }
+  var dados = null, pacote = null;
+
+  function b64(s) { return Uint8Array.from(atob(s), function (c) { return c.charCodeAt(0); }); }
+
+  async function buscarPacote() {
+    var r = await fetch(BASE + "/d.json?t=" + Date.now(), { cache: "no-store" });
+    if (!r.ok) throw new Error("Não consegui baixar os dados (HTTP " + r.status + ").");
+    return r.json();
+  }
+
+  async function chaveDaSenha(senha) {
+    var base = await crypto.subtle.importKey("raw", new TextEncoder().encode(senha), "PBKDF2", false, ["deriveKey"]);
+    return crypto.subtle.deriveKey({ name: "PBKDF2", salt: b64(pacote.sal), iterations: pacote.iter, hash: "SHA-256" },
+                                   base, { name: "AES-GCM", length: 256 }, true, ["decrypt"]);
+  }
+
+  async function abrir(chave) {
+    var claro = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64(pacote.iv) }, chave, b64(pacote.dados));
+    var fluxo = new Blob([claro]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return JSON.parse(await new Response(fluxo).text());
+  }
+
+  function mostrarErro(msg) {
+    var el = document.getElementById("erro");
+    el.textContent = msg; el.hidden = false;
+  }
+
+  // ------------------------------------------------------------ navegação
+  function rotaAtual() { return semBase(location.pathname) + location.search; }
+
+  function navegar(url) {
+    if (url !== rotaAtual()) history.pushState(null, "", BASE + url);
+    render();
+  }
+
+  function render() {
+    var caminho = semBase(location.pathname) + location.search;
+    var html = dados.paginas[caminho] || dados.paginas[semBase(location.pathname)] || dados.paginas["/"];
+    var doc = new DOMParser().parseFromString(html, "text/html");
+    var app = document.getElementById("app");
+    app.innerHTML = doc.body.innerHTML;
+    document.title = doc.title || "Eclass Tracker";
+    somenteLeitura(app);
+    var cal = app.querySelector("#calendario");
+    if (cal) {
+      var tentar = function () {
+        if (window.FullCalendar && window.iniciarCalendario) window.iniciarCalendario(cal, dados.eventos, navegar);
+        else setTimeout(tentar, 100);
+      };
+      tentar();
+    }
+    if (location.hash) {
+      var alvo = document.getElementById(location.hash.slice(1));
+      if (alvo) alvo.scrollIntoView();
+    } else {
+      window.scrollTo(0, 0);
+    }
+  }
+
+  function somenteLeitura(raiz) {
+    // "Atualizar" e o selo de status só fazem sentido no computador (é lá que a sincronização roda)
+    raiz.querySelectorAll('.nav a[href="/sync"]').forEach(function (a) { a.remove(); });
+    raiz.querySelectorAll('a.status-sync').forEach(function (a) { a.removeAttribute("href"); });
+    raiz.querySelectorAll("form").forEach(function (f) {
+      var acao = f.getAttribute("action") || "";
+      if (acao.indexOf("/status") >= 0) {
+        var sel = f.querySelector("select");
+        var txt = sel ? sel.options[sel.selectedIndex].text : "";
+        var s = document.createElement("span");
+        s.className = "so-leitura"; s.textContent = txt;
+        f.replaceWith(s);
+      } else {
+        f.remove();  // sincronizar, sair etc.: só no computador
+      }
+    });
+  }
+
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest && e.target.closest("a[href]");
+    if (!a || !dados) return;
+    var href = a.getAttribute("href");
+    if (href.charAt(0) === "/" && href.charAt(1) !== "/" && !a.target) {
+      e.preventDefault();
+      navegar(href);
+    }
+  });
+  window.addEventListener("popstate", function () { if (dados) render(); });
+
+  // ------------------------------------------------------------ entrada
+  function entrou() {
+    document.getElementById("tela-login").hidden = true;
+    document.getElementById("faixa").hidden = false;
+    document.getElementById("quando").textContent = dados.gerado_em;
+    render();
+  }
+
+  document.getElementById("sair").addEventListener("click", function () {
+    try { localStorage.removeItem(CHAVE_LOCAL); } catch (e) {}
+    location.href = BASE + "/";
+  });
+
+  document.getElementById("entrar").addEventListener("submit", async function (ev) {
+    ev.preventDefault();
+    var botao = document.getElementById("botao");
+    botao.disabled = true; botao.textContent = "Abrindo...";
+    document.getElementById("erro").hidden = true;
+    try {
+      if (!pacote) pacote = await buscarPacote();
+      var chave = await chaveDaSenha(document.getElementById("senha").value);
+      dados = await abrir(chave);
+      if (document.getElementById("lembrar").checked) {
+        try {
+          var bruta = await crypto.subtle.exportKey("raw", chave);
+          localStorage.setItem(CHAVE_LOCAL, btoa(String.fromCharCode.apply(null, new Uint8Array(bruta))));
+        } catch (e) {}
+      }
+      entrou();
+    } catch (e) {
+      mostrarErro(e && e.name === "OperationError" ? "Senha errada." : (e.message || "Não consegui abrir."));
+    } finally {
+      botao.disabled = false; botao.textContent = "Entrar";
+    }
+  });
+
+  // Aparelho lembrado: abre direto com a chave guardada (a senha em si nunca é guardada).
+  (async function () {
+    var salva = null;
+    try { salva = localStorage.getItem(CHAVE_LOCAL); } catch (e) {}
+    if (!salva) return;
+    try {
+      pacote = await buscarPacote();
+      var chave = await crypto.subtle.importKey("raw", b64(salva), { name: "AES-GCM" }, false, ["decrypt"]);
+      dados = await abrir(chave);
+      entrou();
+    } catch (e) {
+      try { localStorage.removeItem(CHAVE_LOCAL); } catch (e2) {}
+    }
+  })();
+})();
+</script>
+</body>
+</html>
